@@ -139,6 +139,14 @@ class AsrConfig:
     sample_rate: int = 16000
     channels: int = 1
     qwen3_command: str | None = None
+    qwen3_model_id: str = "Qwen/Qwen3-ASR-0.6B"
+    qwen3_forced_aligner_id: str = "Qwen/Qwen3-ForcedAligner-0.6B"
+    qwen3_device: str = "auto"
+    qwen3_dtype: str = "float32"
+    qwen3_attn_implementation: str = "sdpa"
+    qwen3_max_new_tokens: int = 4096
+    qwen3_max_segment_chars: int = 24
+    qwen3_max_segment_ms: int = 4000
     faster_whisper_model: str = "large-v3"
     device: str = "cpu"
     compute_type: str = "int8"
@@ -150,6 +158,7 @@ class TranslateConfig:
     model: str = "sonnet"
     batch_size: int = 30
     max_words_per_minute: int = 140
+    contextual_smoothing: bool = True
     temperature: float = 0.1
     claude_code_bin: str = "claude"
     claude_code_permission_mode: str = "bypassPermissions"
@@ -158,8 +167,8 @@ class TranslateConfig:
 
 @dataclass(slots=True)
 class TtsConfig:
-    provider: str = "voxcpm2"
-    fallback_provider: str | None = "kokoro"
+    provider: str = "vibevoice_realtime"
+    fallback_provider: str | None = "macos_say"
     voice_mode: str = "description"
     voice_description: str = (
         "A young adult, natural, energetic, clear American English voice"
@@ -168,8 +177,19 @@ class TtsConfig:
     max_tempo: float = 1.30
     min_segment_chars: int = 8
     merge_gap_ms: int = 250
+    sentence_aware_merge: bool = True
+    sentence_merge_max_duration_ms: int = 17000
+    sentence_merge_max_chars: int = 220
+    smooth_merged_text: bool = True
     sample_rate: int = 24000
     normalize_lufs: int = -16
+    vibevoice_realtime_command: str | None = None
+    vibevoice_model_path: str = "microsoft/VibeVoice-Realtime-0.5B"
+    vibevoice_repo_dir: str | None = None
+    vibevoice_voice_prompt_pt: str | None = None
+    vibevoice_speaker_name: str = "wayne"
+    vibevoice_device: str = "auto"
+    vibevoice_cfg_scale: float = 1.5
     voxcpm2_command: str | None = None
     kokoro_command: str | None = None
     macos_voice: str = "Samantha"
@@ -178,7 +198,7 @@ class TtsConfig:
 @dataclass(slots=True)
 class SubtitleStyleConfig:
     font_name: str = "Arial"
-    font_size: int = 22
+    font_size: int = 14
     margin_v: int = 18
     alignment: int = 2
     primary_color: str = "&H00FFFFFF"
@@ -189,9 +209,11 @@ class SubtitleStyleConfig:
 
 @dataclass(slots=True)
 class ComposeConfig:
-    audio_mode: str = "dub_only"
-    enable_source_separation: bool = False
+    audio_mode: str = "dub_plus_bgm"
+    enable_source_separation: bool = True
     source_separation_provider: str = "demucs"
+    source_separation_model: str = "htdemucs"
+    source_separation_device: str = "cpu"
     bgm_gain_db: float = -12
     video_codec: str = "libx264"
     crf: int = 23

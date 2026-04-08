@@ -17,6 +17,14 @@ asr:
   sample_rate: 16000
   channels: 1
   qwen3_command: null
+  qwen3_model_id: .cache/model-repos/Qwen3-ASR-0.6B
+  qwen3_forced_aligner_id: .cache/model-repos/Qwen3-ForcedAligner-0.6B
+  qwen3_device: auto
+  qwen3_dtype: float32
+  qwen3_attn_implementation: sdpa
+  qwen3_max_new_tokens: 4096
+  qwen3_max_segment_chars: 24
+  qwen3_max_segment_ms: 4000
   faster_whisper_model: large-v3
   device: cpu
   compute_type: int8
@@ -26,29 +34,41 @@ translate:
   model: sonnet
   batch_size: 30
   max_words_per_minute: 140
+  contextual_smoothing: true
   temperature: 0.1
   claude_code_bin: claude
   claude_code_permission_mode: bypassPermissions
   claude_code_tools: ""
 
 tts:
-  provider: voxcpm2
-  fallback_provider: kokoro
+  provider: vibevoice_realtime
+  fallback_provider: macos_say
   voice_mode: description
   voice_description: "A young adult, natural, energetic, clear American English voice"
   reference_wav: null
   max_tempo: 1.30
   min_segment_chars: 8
   merge_gap_ms: 250
+  sentence_aware_merge: true
+  sentence_merge_max_duration_ms: 17000
+  sentence_merge_max_chars: 220
+  smooth_merged_text: true
   sample_rate: 24000
   normalize_lufs: -16
+  vibevoice_realtime_command: null
+  vibevoice_model_path: .cache/model-repos/VibeVoice-Realtime-0.5B
+  vibevoice_repo_dir: .cache/VibeVoice
+  vibevoice_voice_prompt_pt: null
+  vibevoice_speaker_name: Carter
+  vibevoice_device: auto
+  vibevoice_cfg_scale: 1.5
   voxcpm2_command: null
   kokoro_command: null
   macos_voice: Samantha
 
 subtitle:
   font_name: Arial
-  font_size: 22
+  font_size: 14
   margin_v: 18
   alignment: 2
   primary_color: "&H00FFFFFF"
@@ -57,9 +77,11 @@ subtitle:
   shadow: 1
 
 compose:
-  audio_mode: dub_only
-  enable_source_separation: false
+  audio_mode: dub_plus_bgm
+  enable_source_separation: true
   source_separation_provider: demucs
+  source_separation_model: htdemucs
+  source_separation_device: cpu
   bgm_gain_db: -12
   video_codec: libx264
   crf: 23

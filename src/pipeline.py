@@ -18,6 +18,7 @@ from .utils import (
     save_manifest,
     save_status,
     setup_logging,
+    step_config_snapshot,
     should_skip_step,
     utcnow_iso,
     workspace_for_video,
@@ -82,13 +83,14 @@ def process_video(video_path: Path, config: AppConfig) -> Path:
 
     upstream_changed = False
     for step_name, action, outputs in steps:
-        if should_skip_step(step_name, status, config, outputs, upstream_changed):
+        if should_skip_step(step_name, status, config, manifest, outputs, upstream_changed):
             LOGGER.info("Skipping completed step %s for %s", step_name, resolved_video_path.name)
             continue
-        _run_step(step_name, action, status_path, manifest_path, status, manifest)
+        _run_step(step_name, action, status_path, manifest_path, status, manifest, config)
         upstream_changed = True
 
     manifest.outputs["final_video"] = str(final_video)
+    manifest.metadata["config"] = config.to_dict()
     save_manifest(manifest_path, manifest)
     return final_video
 
@@ -100,6 +102,7 @@ def _run_step(
     manifest_path: Path,
     status: object,
     manifest: object,
+    config: AppConfig,
 ) -> None:
     LOGGER.info("Running step %s", step_name)
     started_at = utcnow_iso()
@@ -123,6 +126,11 @@ def _run_step(
 
     status.set(step_name, "completed")
     save_status(status_path, status)
+    metadata = dict(result.get("metadata", {}))
+    config_snapshot = step_config_snapshot(step_name, config)
+    if config_snapshot is not None:
+        metadata["config_snapshot"] = config_snapshot
+
     manifest.steps[step_name] = StepRecord(
         provider=result.get("provider"),
         started_at=started_at,
@@ -130,7 +138,7 @@ def _run_step(
         duration_seconds=round(perf_counter() - started_clock, 3),
         inputs=dict(result.get("inputs", {})),
         outputs=dict(result.get("outputs", {})),
-        metadata=dict(result.get("metadata", {})),
+        metadata=metadata,
     )
     output_path = result.get("output_path")
     if output_path:

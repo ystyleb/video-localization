@@ -132,10 +132,51 @@ def save_manifest(path: Path, manifest: JobManifest) -> None:
     write_json(path, manifest.to_dict())
 
 
+def step_config_snapshot(step_name: str, config: AppConfig) -> dict[str, Any] | None:
+    config_dict = config.to_dict()
+    section = config_dict.get(step_name)
+    if not isinstance(section, dict):
+        return None
+    return section
+
+
+def _stored_step_config_snapshot(step_name: str, manifest: JobManifest | None) -> dict[str, Any] | None:
+    if manifest is None:
+        return None
+
+    step_record = manifest.steps.get(step_name)
+    if step_record:
+        snapshot = step_record.metadata.get("config_snapshot")
+        if isinstance(snapshot, dict):
+            return snapshot
+
+    manifest_config = manifest.metadata.get("config")
+    if not isinstance(manifest_config, dict):
+        return None
+
+    snapshot = manifest_config.get(step_name)
+    if not isinstance(snapshot, dict):
+        return None
+    return snapshot
+
+
+def step_config_changed(step_name: str, config: AppConfig, manifest: JobManifest | None) -> bool:
+    current_snapshot = step_config_snapshot(step_name, config)
+    if current_snapshot is None:
+        return False
+
+    previous_snapshot = _stored_step_config_snapshot(step_name, manifest)
+    if previous_snapshot is None:
+        return False
+
+    return current_snapshot != previous_snapshot
+
+
 def should_skip_step(
     step_name: str,
     state: JobState,
     config: AppConfig,
+    manifest: JobManifest | None,
     required_outputs: Iterable[Path],
     upstream_changed: bool,
 ) -> bool:
@@ -144,6 +185,9 @@ def should_skip_step(
     if not config.runtime.resume:
         return False
     if state.get(step_name) != "completed":
+        return False
+    if step_config_changed(step_name, config, manifest):
+        LOGGER.info("Config changed for step %s; rerunning it", step_name)
         return False
     return all(output.exists() for output in required_outputs)
 

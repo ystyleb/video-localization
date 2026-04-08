@@ -1,15 +1,78 @@
 from __future__ import annotations
 
+import copy
+import glob
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
 
 from .models import AppConfig, MergedSegment, SubtitleSegment
 from .subtitle import parse_srt
-from .utils import command_path, ffprobe_duration, render_shell_template, run_command
+from .utils import (
+    command_path,
+    ffprobe_duration,
+    module_available,
+    project_root,
+    render_shell_template,
+    resolve_path,
+    run_command,
+)
 
+KNOWN_VIBEVOICE_COMMANDS = ("python", "uv")
 KNOWN_VOXCPM2_COMMANDS = ("voxcpm2", "voxcpm")
 KNOWN_KOKORO_COMMANDS = ("kokoro",)
+TERMINAL_PUNCTUATION_RE = re.compile(r"[.!?…][\"')\]]*$")
+BROKEN_WORD_RE = re.compile(r"[A-Za-z0-9]-$")
+WEAK_BREAK_RE = re.compile(r"[,;:—-][\"')\]]*$")
+CONTINUATION_START_RE = re.compile(r"^(?:[a-z0-9\"'(]|—|-)")
+DANGLING_END_WORDS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "because",
+    "but",
+    "by",
+    "for",
+    "from",
+    "here",
+    "if",
+    "in",
+    "is",
+    "it's",
+    "its",
+    "let's",
+    "my",
+    "of",
+    "on",
+    "or",
+    "our",
+    "so",
+    "that",
+    "the",
+    "their",
+    "there",
+    "then",
+    "these",
+    "this",
+    "those",
+    "to",
+    "first",
+    "was",
+    "we're",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "while",
+    "who",
+    "why",
+    "with",
+    "your",
+}
 
 
 def generate_voiceover(en_srt: Path, output_wav: Path, config: AppConfig) -> dict[str, Any]:
@@ -21,15 +84,26 @@ def generate_voiceover(en_srt: Path, output_wav: Path, config: AppConfig) -> dic
         segments,
         min_segment_chars=config.tts.min_segment_chars,
         merge_gap_ms=config.tts.merge_gap_ms,
+        sentence_aware_merge=config.tts.sentence_aware_merge,
+        sentence_merge_max_duration_ms=config.tts.sentence_merge_max_duration_ms,
+        sentence_merge_max_chars=config.tts.sentence_merge_max_chars,
     )
+    merged_segments = _smooth_merged_segments_for_tts(merged_segments, config)
 
     providers_used: list[str] = []
+    provider_cache: dict[str, Any] = {}
     with tempfile.TemporaryDirectory(prefix="shorts-tts-") as temp_dir_name:
         temp_dir = Path(temp_dir_name)
         audio_parts: list[tuple[Path, int, int]] = []
         for position, segment in enumerate(merged_segments):
             raw_path = temp_dir / f"raw_{position:04d}.wav"
-            provider_used = _synthesize_segment(segment.text, raw_path, config, temp_dir)
+            provider_used = _synthesize_segment(
+                segment.text,
+                raw_path,
+                config,
+                temp_dir,
+                provider_cache,
+            )
             providers_used.append(provider_used)
 
             aligned_path = temp_dir / f"aligned_{position:04d}.wav"
@@ -48,6 +122,7 @@ def generate_voiceover(en_srt: Path, output_wav: Path, config: AppConfig) -> dic
         "metadata": {
             "merged_segment_count": len(merged_segments),
             "providers": distinct_providers,
+            "smooth_merged_text": config.tts.smooth_merged_text,
         },
         "outputs": {"voiceover_wav": str(output_wav)},
         "inputs": {"en_srt": str(en_srt)},
@@ -59,6 +134,9 @@ def merge_segments(
     *,
     min_segment_chars: int,
     merge_gap_ms: int,
+    sentence_aware_merge: bool,
+    sentence_merge_max_duration_ms: int,
+    sentence_merge_max_chars: int,
 ) -> list[MergedSegment]:
     merged: list[MergedSegment] = []
     current: MergedSegment | None = None
@@ -78,7 +156,17 @@ def merge_segments(
         current_short = len(current.text.replace(" ", "")) < min_segment_chars
         next_short = text_length < min_segment_chars
 
-        if (current_short or next_short) and gap <= merge_gap_ms:
+        if _should_merge_segment_pair(
+            current,
+            segment,
+            gap=gap,
+            current_short=current_short,
+            next_short=next_short,
+            merge_gap_ms=merge_gap_ms,
+            sentence_aware_merge=sentence_aware_merge,
+            sentence_merge_max_duration_ms=sentence_merge_max_duration_ms,
+            sentence_merge_max_chars=sentence_merge_max_chars,
+        ):
             current.indices.append(segment.index)
             current.end_ms = segment.end_ms
             current.text = f"{current.text} {segment.text.strip()}".strip()
@@ -97,16 +185,115 @@ def merge_segments(
     return merged
 
 
+def _should_merge_segment_pair(
+    current: MergedSegment,
+    next_segment: SubtitleSegment,
+    *,
+    gap: int,
+    current_short: bool,
+    next_short: bool,
+    merge_gap_ms: int,
+    sentence_aware_merge: bool,
+    sentence_merge_max_duration_ms: int,
+    sentence_merge_max_chars: int,
+) -> bool:
+    if gap > merge_gap_ms:
+        return False
+
+    candidate_duration_ms = next_segment.end_ms - current.start_ms
+    candidate_text = f"{current.text.strip()} {next_segment.text.strip()}".strip()
+    candidate_chars = len(candidate_text.replace(" ", ""))
+    if candidate_duration_ms > sentence_merge_max_duration_ms:
+        return False
+    if candidate_chars > sentence_merge_max_chars:
+        return False
+
+    if current_short or next_short:
+        return True
+
+    if not sentence_aware_merge:
+        return False
+
+    return _boundary_needs_continuation(current.text, next_segment.text)
+
+
+def _boundary_needs_continuation(current_text: str, next_text: str) -> bool:
+    current_clean = current_text.strip()
+    next_clean = next_text.strip()
+    if not current_clean or not next_clean:
+        return False
+
+    if BROKEN_WORD_RE.search(current_clean):
+        return True
+    if WEAK_BREAK_RE.search(current_clean):
+        return True
+    if _ends_with_dangling_word(current_clean):
+        return True
+    if not TERMINAL_PUNCTUATION_RE.search(current_clean) and _count_words(current_clean) <= 6:
+        return True
+    if not TERMINAL_PUNCTUATION_RE.search(current_clean) and CONTINUATION_START_RE.search(next_clean):
+        return True
+    return False
+
+
+def _ends_with_dangling_word(text: str) -> bool:
+    matches = re.findall(r"[A-Za-z']+", text.lower())
+    if not matches:
+        return False
+    return matches[-1] in DANGLING_END_WORDS
+
+
+def _count_words(text: str) -> int:
+    return len(re.findall(r"\b[\w'-]+\b", text))
+
+
+def _smooth_merged_segments_for_tts(
+    merged_segments: list[MergedSegment],
+    config: AppConfig,
+) -> list[MergedSegment]:
+    if not config.tts.smooth_merged_text or len(merged_segments) <= 1:
+        return merged_segments
+
+    from .translate import smooth_spoken_english_chunks
+
+    texts = [segment.text for segment in merged_segments]
+    durations_ms = [segment.end_ms - segment.start_ms for segment in merged_segments]
+    rewritten = smooth_spoken_english_chunks(texts, durations_ms, config)
+    if len(rewritten) != len(merged_segments):
+        return merged_segments
+
+    smoothed: list[MergedSegment] = []
+    for segment, rewritten_text in zip(merged_segments, rewritten, strict=True):
+        smoothed.append(
+            MergedSegment(
+                indices=list(segment.indices),
+                start_ms=segment.start_ms,
+                end_ms=segment.end_ms,
+                text=rewritten_text.strip(),
+            )
+        )
+    return smoothed
+
+
 def _synthesize_segment(
     text: str,
     output_path: Path,
     config: AppConfig,
     temp_dir: Path,
+    provider_cache: dict[str, Any],
 ) -> str:
     attempts: list[str] = []
     for provider_name in _tts_provider_chain(config):
         try:
-            if provider_name == "voxcpm2":
+            if provider_name == "vibevoice_realtime":
+                _synthesize_with_vibevoice_realtime(
+                    text,
+                    output_path,
+                    config,
+                    temp_dir,
+                    provider_cache,
+                )
+            elif provider_name == "voxcpm2":
                 _synthesize_with_command(
                     config.tts.voxcpm2_command,
                     text,
@@ -158,7 +345,9 @@ def _synthesize_with_command(
 ) -> None:
     if not template:
         known_commands = (
-            KNOWN_VOXCPM2_COMMANDS
+            KNOWN_VIBEVOICE_COMMANDS
+            if provider_name == "vibevoice_realtime"
+            else KNOWN_VOXCPM2_COMMANDS
             if provider_name == "voxcpm2"
             else KNOWN_KOKORO_COMMANDS
             if provider_name == "kokoro"
@@ -184,14 +373,170 @@ def _synthesize_with_command(
             "text": text,
             "text_file": text_file,
             "output_path": output_path,
+            "output_dir": output_path.parent,
             "sample_rate": config.tts.sample_rate,
             "voice_description": config.tts.voice_description,
             "reference_wav": config.tts.reference_wav or "",
+            "model_path": config.tts.vibevoice_model_path,
+            "repo_dir": config.tts.vibevoice_repo_dir or "",
+            "voice_prompt_pt": config.tts.vibevoice_voice_prompt_pt or "",
+            "speaker_name": config.tts.vibevoice_speaker_name,
+            "device": config.tts.vibevoice_device,
+            "cfg_scale": config.tts.vibevoice_cfg_scale,
         },
     )
     run_command(command)
     if not output_path.exists():
         raise RuntimeError("TTS command completed but output audio was not created")
+
+
+def _synthesize_with_vibevoice_realtime(
+    text: str,
+    output_path: Path,
+    config: AppConfig,
+    temp_dir: Path,
+    provider_cache: dict[str, Any],
+) -> None:
+    if module_available("vibevoice") and module_available("torch"):
+        runtime = provider_cache.get("vibevoice_realtime")
+        if runtime is None:
+            runtime = _load_vibevoice_runtime(config)
+            provider_cache["vibevoice_realtime"] = runtime
+        _generate_with_vibevoice_runtime(runtime, text, output_path)
+        return
+
+    if config.tts.vibevoice_realtime_command:
+        _synthesize_with_command(
+            config.tts.vibevoice_realtime_command,
+            text,
+            output_path,
+            config,
+            temp_dir,
+            provider_name="vibevoice_realtime",
+        )
+        return
+
+    raise RuntimeError(
+        "VibeVoice-Realtime requires either the official `vibevoice` Python package "
+        "to be installed or `tts.vibevoice_realtime_command` to be configured."
+    )
+
+
+def _load_vibevoice_runtime(config: AppConfig) -> dict[str, Any]:
+    import torch
+    from vibevoice.modular.modeling_vibevoice_streaming_inference import (
+        VibeVoiceStreamingForConditionalGenerationInference,
+    )
+    from vibevoice.processor.vibevoice_streaming_processor import VibeVoiceStreamingProcessor
+
+    device = _pick_vibevoice_device(config)
+    dtype = torch.float32 if device in {"cpu", "mps"} else torch.bfloat16
+    attn_implementation = "sdpa" if device in {"cpu", "mps"} else "flash_attention_2"
+    device_map = None if device == "mps" else device
+
+    processor = VibeVoiceStreamingProcessor.from_pretrained(config.tts.vibevoice_model_path)
+    try:
+        model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+            config.tts.vibevoice_model_path,
+            torch_dtype=dtype,
+            attn_implementation=attn_implementation,
+            device_map=device_map,
+        )
+    except Exception:  # noqa: BLE001
+        model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+            config.tts.vibevoice_model_path,
+            torch_dtype=dtype,
+            attn_implementation="sdpa",
+            device_map=device_map,
+        )
+
+    if device == "mps":
+        model = model.to(device)
+    model.eval()
+    model.set_ddpm_inference_steps(num_steps=5)
+
+    voice_prompt_path = _resolve_vibevoice_voice_prompt(config)
+    cached_prompt = torch.load(voice_prompt_path, map_location=device, weights_only=False)
+    return {
+        "cfg_scale": config.tts.vibevoice_cfg_scale,
+        "cached_prompt": cached_prompt,
+        "device": device,
+        "model": model,
+        "processor": processor,
+    }
+
+
+def _generate_with_vibevoice_runtime(
+    runtime: dict[str, Any],
+    text: str,
+    output_path: Path,
+) -> None:
+    processor = runtime["processor"]
+    model = runtime["model"]
+    cached_prompt = runtime["cached_prompt"]
+    device = runtime["device"]
+
+    inputs = processor.process_input_with_cached_prompt(
+        text=text,
+        cached_prompt=cached_prompt,
+        padding=True,
+        return_tensors="pt",
+        return_attention_mask=True,
+    )
+    prepared_inputs = {
+        key: value.to(device) if hasattr(value, "to") else value
+        for key, value in inputs.items()
+    }
+    outputs = model.generate(
+        **prepared_inputs,
+        max_new_tokens=None,
+        cfg_scale=runtime["cfg_scale"],
+        tokenizer=processor.tokenizer,
+        generation_config={"do_sample": False},
+        verbose=False,
+        all_prefilled_outputs=copy.deepcopy(cached_prompt),
+    )
+    processor.save_audio(outputs.speech_outputs[0], output_path=str(output_path))
+    if not output_path.exists():
+        raise RuntimeError("VibeVoice-Realtime did not create the expected output audio file")
+
+
+def _pick_vibevoice_device(config: AppConfig) -> str:
+    import torch
+
+    preferred = (config.tts.vibevoice_device or "auto").lower()
+    if preferred != "auto":
+        return preferred
+    if torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
+
+
+def _resolve_vibevoice_voice_prompt(config: AppConfig) -> Path:
+    if config.tts.vibevoice_voice_prompt_pt:
+        path = resolve_path(config.tts.vibevoice_voice_prompt_pt, project_root())
+        if path.exists():
+            return path
+        raise RuntimeError(f"Configured VibeVoice voice prompt does not exist: {path}")
+
+    if config.tts.vibevoice_repo_dir:
+        repo_dir = resolve_path(config.tts.vibevoice_repo_dir, project_root())
+        voice_dir = repo_dir / "demo" / "voices" / "streaming_model"
+        if not voice_dir.exists():
+            raise RuntimeError(f"VibeVoice repo voice directory not found: {voice_dir}")
+        matches = sorted(glob.glob(str(voice_dir / f"*{config.tts.vibevoice_speaker_name}*.pt")))
+        if not matches:
+            matches = sorted(glob.glob(str(voice_dir / "*.pt")))
+        if not matches:
+            raise RuntimeError(f"No VibeVoice prompt `.pt` files found in {voice_dir}")
+        return Path(matches[0])
+
+    raise RuntimeError(
+        "Configure either `tts.vibevoice_voice_prompt_pt` or `tts.vibevoice_repo_dir` "
+        "to let VibeVoice-Realtime find a voice prompt preset."
+    )
 
 
 def _synthesize_with_macos_say(
