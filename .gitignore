@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.env
+.DS_Store
+input/*
+!input/.gitkeep
+output/*
+!output/.gitkeep
+workspace/*
+!workspace/.gitkeep

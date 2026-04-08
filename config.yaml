@@ -1,0 +1,68 @@
+paths:
+  input_dir: input
+  output_dir: output
+  workspace_dir: workspace
+
+runtime:
+  resume: true
+  overwrite: false
+  log_level: INFO
+  ffmpeg_bin: ffmpeg
+  ffprobe_bin: ffprobe
+
+asr:
+  provider: qwen3_asr
+  fallback_provider: faster_whisper
+  language: zh
+  sample_rate: 16000
+  channels: 1
+  qwen3_command: null
+  faster_whisper_model: large-v3
+  device: cpu
+  compute_type: int8
+
+translate:
+  provider: claude_code
+  model: sonnet
+  batch_size: 30
+  max_words_per_minute: 140
+  temperature: 0.1
+  claude_code_bin: claude
+  claude_code_permission_mode: bypassPermissions
+  claude_code_tools: ""
+
+tts:
+  provider: voxcpm2
+  fallback_provider: kokoro
+  voice_mode: description
+  voice_description: "A young adult, natural, energetic, clear American English voice"
+  reference_wav: null
+  max_tempo: 1.30
+  min_segment_chars: 8
+  merge_gap_ms: 250
+  sample_rate: 24000
+  normalize_lufs: -16
+  voxcpm2_command: null
+  kokoro_command: null
+  macos_voice: Samantha
+
+subtitle:
+  font_name: Arial
+  font_size: 22
+  margin_v: 18
+  alignment: 2
+  primary_color: "&H00FFFFFF"
+  outline_color: "&H00000000"
+  outline: 2
+  shadow: 1
+
+compose:
+  audio_mode: dub_only
+  enable_source_separation: false
+  source_separation_provider: demucs
+  bgm_gain_db: -12
+  video_codec: libx264
+  crf: 23
+  preset: medium
+  audio_codec: aac
+  audio_bitrate: 192k
