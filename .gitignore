@@ -6,6 +6,7 @@ __pycache__/
 *.egg-info/
 .env
 .DS_Store
+.cache/
 input/*
 !input/.gitkeep
 output/*

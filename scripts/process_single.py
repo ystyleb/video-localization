@@ -13,6 +13,33 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional path to config.yaml",
     )
+    parser.add_argument(
+        "--tts-provider",
+        choices=["vibevoice_realtime", "voxcpm2", "kokoro", "macos_say"],
+        default=None,
+        help="Optional TTS provider override for this single run",
+    )
+    parser.add_argument(
+        "--voice-clone",
+        action="store_true",
+        help="Enable clone mode. If the current provider is VibeVoice-Realtime, it will switch to voxcpm2.",
+    )
+    parser.add_argument(
+        "--reference-wav",
+        type=Path,
+        default=None,
+        help="Optional manual reference audio for clone mode. If omitted, a reference clip is auto-extracted from the source video.",
+    )
+    parser.add_argument(
+        "--reference-text",
+        default=None,
+        help="Optional transcript for --reference-wav. Recommended when using a manual prompt clip.",
+    )
+    parser.add_argument(
+        "--disable-auto-reference",
+        action="store_true",
+        help="Disable automatic reference extraction from the source video during clone mode.",
+    )
     return parser
 
 
@@ -24,6 +51,23 @@ def main() -> int:
     from src.utils import load_config
 
     config = load_config(args.config)
+    if args.tts_provider:
+        config.tts.provider = args.tts_provider
+        config.tts.fallback_provider = None
+
+    if args.voice_clone:
+        config.tts.voice_mode = "clone"
+        if config.tts.provider == "vibevoice_realtime":
+            config.tts.provider = "voxcpm2"
+            config.tts.fallback_provider = None
+
+    if args.reference_wav:
+        config.tts.reference_wav = str(args.reference_wav)
+    if args.reference_text:
+        config.tts.reference_text = args.reference_text
+    if args.disable_auto_reference:
+        config.tts.auto_reference_from_source = False
+
     output_path = process_video(args.video, config)
     print(output_path)
     return 0
@@ -31,4 +75,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

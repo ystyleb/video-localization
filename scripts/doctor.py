@@ -128,10 +128,20 @@ def _check_tts_provider(config: object, add_row: callable, command_path: callabl
             ),
         )
     elif config.tts.provider == "voxcpm2":
+        has_builtin_runner = False
+        try:
+            from src.utils import project_root
+
+            has_builtin_runner = (project_root() / "scripts" / "voxcpm_http_tts.py").exists()
+        except Exception:  # noqa: BLE001
+            has_builtin_runner = False
         add_row(
-            "tts.voxcpm2_command",
-            bool(config.tts.voxcpm2_command),
-            config.tts.voxcpm2_command or "set a local shell template in config.yaml",
+            "tts.voxcpm2_runner",
+            bool(config.tts.voxcpm2_command or has_builtin_runner),
+            (
+                config.tts.voxcpm2_command
+                or "built-in scripts/voxcpm_http_tts.py (requires a local VoxCPM-compatible HTTP server)"
+            ),
         )
     elif config.tts.provider == "kokoro":
         add_row(
@@ -141,6 +151,19 @@ def _check_tts_provider(config: object, add_row: callable, command_path: callabl
         )
     elif config.tts.provider == "macos_say":
         add_row("macOS say", bool(command_path("say")), "built-in TTS fallback")
+
+    if config.tts.voice_mode == "clone":
+        if config.tts.reference_wav:
+            clone_reference_detail = config.tts.reference_wav
+        elif config.tts.auto_reference_from_source:
+            clone_reference_detail = "auto extract from source audio using zh.srt timing"
+        else:
+            clone_reference_detail = "set tts.reference_wav or enable tts.auto_reference_from_source"
+        add_row(
+            "tts.clone_reference",
+            bool(config.tts.reference_wav or config.tts.auto_reference_from_source),
+            clone_reference_detail,
+        )
 
     if config.tts.fallback_provider == "kokoro":
         add_row(

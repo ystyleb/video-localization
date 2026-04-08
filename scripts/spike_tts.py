@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--provider",
-        choices=["voxcpm2", "kokoro", "macos_say"],
+        choices=["vibevoice_realtime", "voxcpm2", "kokoro", "macos_say"],
         default=None,
         help="Override the TTS provider for this spike run",
     )
@@ -81,4 +81,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

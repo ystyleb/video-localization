@@ -174,6 +174,14 @@ class TtsConfig:
         "A young adult, natural, energetic, clear American English voice"
     )
     reference_wav: str | None = None
+    reference_text: str | None = None
+    auto_reference_from_source: bool = True
+    auto_reference_use_vocals: bool = True
+    auto_reference_min_chars: int = 12
+    auto_reference_min_duration_ms: int = 2500
+    auto_reference_target_duration_ms: int = 6500
+    auto_reference_max_duration_ms: int = 12000
+    auto_reference_max_gap_ms: int = 350
     max_tempo: float = 1.30
     min_segment_chars: int = 8
     merge_gap_ms: int = 250
@@ -191,6 +199,7 @@ class TtsConfig:
     vibevoice_device: str = "auto"
     vibevoice_cfg_scale: float = 1.5
     voxcpm2_command: str | None = None
+    voxcpm2_base_url: str = "http://127.0.0.1:8000"
     kokoro_command: str | None = None
     macos_voice: str = "Samantha"
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import glob
 import re
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -75,20 +76,38 @@ DANGLING_END_WORDS = {
 }
 
 
-def generate_voiceover(en_srt: Path, output_wav: Path, config: AppConfig) -> dict[str, Any]:
+def generate_voiceover(
+    en_srt: Path,
+    output_wav: Path,
+    config: AppConfig,
+    *,
+    source_audio: Path | None = None,
+    zh_srt: Path | None = None,
+    workspace_dir: Path | None = None,
+) -> dict[str, Any]:
     segments = parse_srt(en_srt)
     if not segments:
         raise RuntimeError(f"No subtitle segments found in {en_srt}")
 
+    effective_config = copy.deepcopy(config)
+    tts_metadata: dict[str, Any] = {}
+    if effective_config.tts.voice_mode == "clone":
+        effective_config, tts_metadata = _prepare_config_for_clone_tts(
+            effective_config,
+            source_audio=source_audio,
+            zh_srt=zh_srt,
+            workspace_dir=workspace_dir,
+        )
+
     merged_segments = merge_segments(
         segments,
-        min_segment_chars=config.tts.min_segment_chars,
-        merge_gap_ms=config.tts.merge_gap_ms,
-        sentence_aware_merge=config.tts.sentence_aware_merge,
-        sentence_merge_max_duration_ms=config.tts.sentence_merge_max_duration_ms,
-        sentence_merge_max_chars=config.tts.sentence_merge_max_chars,
+        min_segment_chars=effective_config.tts.min_segment_chars,
+        merge_gap_ms=effective_config.tts.merge_gap_ms,
+        sentence_aware_merge=effective_config.tts.sentence_aware_merge,
+        sentence_merge_max_duration_ms=effective_config.tts.sentence_merge_max_duration_ms,
+        sentence_merge_max_chars=effective_config.tts.sentence_merge_max_chars,
     )
-    merged_segments = _smooth_merged_segments_for_tts(merged_segments, config)
+    merged_segments = _smooth_merged_segments_for_tts(merged_segments, effective_config)
 
     providers_used: list[str] = []
     provider_cache: dict[str, Any] = {}
@@ -100,30 +119,33 @@ def generate_voiceover(en_srt: Path, output_wav: Path, config: AppConfig) -> dic
             provider_used = _synthesize_segment(
                 segment.text,
                 raw_path,
-                config,
+                effective_config,
                 temp_dir,
                 provider_cache,
             )
             providers_used.append(provider_used)
 
             aligned_path = temp_dir / f"aligned_{position:04d}.wav"
-            _align_audio(raw_path, aligned_path, segment.end_ms - segment.start_ms, config)
+            _align_audio(raw_path, aligned_path, segment.end_ms - segment.start_ms, effective_config)
             audio_parts.append((aligned_path, segment.start_ms, segment.end_ms))
 
         timeline_path = temp_dir / "timeline.wav"
         total_duration_ms = merged_segments[-1].end_ms
-        _assemble_timeline(audio_parts, timeline_path, total_duration_ms, config, temp_dir)
-        _normalize_audio(timeline_path, output_wav, config)
+        _assemble_timeline(audio_parts, timeline_path, total_duration_ms, effective_config, temp_dir)
+        _normalize_audio(timeline_path, output_wav, effective_config)
 
     distinct_providers = list(dict.fromkeys(providers_used))
+    metadata = {
+        "merged_segment_count": len(merged_segments),
+        "providers": distinct_providers,
+        "smooth_merged_text": effective_config.tts.smooth_merged_text,
+        "voice_mode": effective_config.tts.voice_mode,
+    }
+    metadata.update(tts_metadata)
     return {
         "output_path": str(output_wav),
         "provider": ",".join(distinct_providers),
-        "metadata": {
-            "merged_segment_count": len(merged_segments),
-            "providers": distinct_providers,
-            "smooth_merged_text": config.tts.smooth_merged_text,
-        },
+        "metadata": metadata,
         "outputs": {"voiceover_wav": str(output_wav)},
         "inputs": {"en_srt": str(en_srt)},
     }
@@ -275,6 +297,89 @@ def _smooth_merged_segments_for_tts(
     return smoothed
 
 
+def _prepare_config_for_clone_tts(
+    config: AppConfig,
+    *,
+    source_audio: Path | None,
+    zh_srt: Path | None,
+    workspace_dir: Path | None,
+) -> tuple[AppConfig, dict[str, Any]]:
+    clone_capable_providers = {"voxcpm2"}
+    if config.tts.provider not in clone_capable_providers:
+        if config.tts.fallback_provider in clone_capable_providers:
+            config.tts.provider = str(config.tts.fallback_provider)
+            config.tts.fallback_provider = None
+        else:
+            raise RuntimeError(
+                "tts.voice_mode=clone requires a provider that accepts reference audio, "
+                "for example `voxcpm2`."
+            )
+
+    if config.tts.fallback_provider and config.tts.fallback_provider not in clone_capable_providers:
+        config.tts.fallback_provider = None
+
+    provider_chain = _tts_provider_chain(config)
+    if not any(provider in clone_capable_providers for provider in provider_chain):
+        raise RuntimeError(
+            "tts.voice_mode=clone requires a provider that accepts reference audio, "
+            "for example `voxcpm2`."
+        )
+
+    metadata: dict[str, Any] = {"clone_reference_mode": "manual"}
+    if config.tts.reference_wav:
+        reference_wav = resolve_path(config.tts.reference_wav, project_root())
+        if not reference_wav.exists():
+            raise RuntimeError(f"Configured clone reference audio does not exist: {reference_wav}")
+        config.tts.reference_wav = str(reference_wav)
+        if config.tts.reference_text:
+            config.tts.reference_text = config.tts.reference_text.strip()
+        metadata["clone_reference_wav"] = str(reference_wav)
+        if config.tts.reference_text:
+            metadata["clone_reference_text_chars"] = len(config.tts.reference_text)
+        elif not config.tts.auto_reference_from_source:
+            raise RuntimeError(
+                "tts.reference_text is required when tts.voice_mode=clone uses a manual reference_wav."
+            )
+
+    if not config.tts.reference_wav and config.tts.auto_reference_from_source:
+        if source_audio is None or zh_srt is None or workspace_dir is None:
+            raise RuntimeError(
+                "Voice clone auto-reference requires source_audio, zh_srt, and workspace_dir."
+            )
+        from .voice_clone import prepare_reference_assets
+
+        prepared = prepare_reference_assets(source_audio, zh_srt, workspace_dir, config)
+        config.tts.reference_wav = str(prepared.wav_path)
+        if not config.tts.reference_text:
+            config.tts.reference_text = prepared.text
+        metadata.update(
+            {
+                "clone_reference_mode": "auto",
+                "clone_reference_wav": str(prepared.wav_path),
+                "clone_reference_text_path": str(prepared.text_path),
+                "clone_reference_text_chars": len(prepared.text),
+                "clone_reference_start_ms": prepared.start_ms,
+                "clone_reference_end_ms": prepared.end_ms,
+                "clone_reference_segment_indices": prepared.indices,
+                "clone_reference_used_vocals_stem": prepared.used_vocals_stem,
+            }
+        )
+
+    if not config.tts.reference_wav:
+        raise RuntimeError(
+            "tts.voice_mode=clone requires either tts.reference_wav or auto_reference_from_source."
+        )
+
+    if not (config.tts.reference_text or "").strip():
+        raise RuntimeError(
+            "tts.voice_mode=clone requires reference_text. "
+            "Provide tts.reference_text or enable auto reference extraction."
+        )
+
+    config.tts.reference_text = str(config.tts.reference_text).strip()
+    return config, metadata
+
+
 def _synthesize_segment(
     text: str,
     output_path: Path,
@@ -343,6 +448,7 @@ def _synthesize_with_command(
     *,
     provider_name: str,
 ) -> None:
+    template = template or _default_tts_command_template(provider_name)
     if not template:
         known_commands = (
             KNOWN_VIBEVOICE_COMMANDS
@@ -377,17 +483,37 @@ def _synthesize_with_command(
             "sample_rate": config.tts.sample_rate,
             "voice_description": config.tts.voice_description,
             "reference_wav": config.tts.reference_wav or "",
+            "reference_text": config.tts.reference_text or "",
             "model_path": config.tts.vibevoice_model_path,
             "repo_dir": config.tts.vibevoice_repo_dir or "",
             "voice_prompt_pt": config.tts.vibevoice_voice_prompt_pt or "",
             "speaker_name": config.tts.vibevoice_speaker_name,
             "device": config.tts.vibevoice_device,
             "cfg_scale": config.tts.vibevoice_cfg_scale,
+            "python_bin": sys.executable,
+            "voxcpm2_base_url": config.tts.voxcpm2_base_url,
+            "voxcpm2_runner": project_root() / "scripts" / "voxcpm_http_tts.py",
         },
     )
     run_command(command)
     if not output_path.exists():
         raise RuntimeError("TTS command completed but output audio was not created")
+
+
+def _default_tts_command_template(provider_name: str) -> str | None:
+    if provider_name != "voxcpm2":
+        return None
+    runner = project_root() / "scripts" / "voxcpm_http_tts.py"
+    if not runner.exists():
+        return None
+    return (
+        "{python_bin} {voxcpm2_runner} "
+        "--base-url {voxcpm2_base_url} "
+        "--text-file {text_file} "
+        "--output {output_path} "
+        "--prompt-wav-path {reference_wav} "
+        "--prompt-text {reference_text}"
+    )
 
 
 def _synthesize_with_vibevoice_realtime(

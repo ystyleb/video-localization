@@ -66,7 +66,14 @@ def process_video(video_path: Path, config: AppConfig) -> Path:
         ),
         (
             "tts",
-            lambda: generate_voiceover(en_srt, voiceover_wav, config),
+            lambda: generate_voiceover(
+                en_srt,
+                voiceover_wav,
+                config,
+                source_audio=source_audio,
+                zh_srt=zh_srt,
+                workspace_dir=workspace_dir,
+            ),
             [voiceover_wav],
         ),
         (
