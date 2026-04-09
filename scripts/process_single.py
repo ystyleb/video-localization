@@ -36,9 +36,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional transcript for --reference-wav. Recommended when using a manual prompt clip.",
     )
     parser.add_argument(
+        "--voxcpm2-base-url",
+        default=None,
+        help="Optional base URL override for the built-in VoxCPM HTTP runner.",
+    )
+    parser.add_argument(
         "--disable-auto-reference",
         action="store_true",
         help="Disable automatic reference extraction from the source video during clone mode.",
+    )
+    parser.add_argument(
+        "--line-sync",
+        action="store_true",
+        help="Force one subtitle line per TTS chunk for tighter sentence timing.",
     )
     return parser
 
@@ -48,6 +58,7 @@ def main() -> int:
     args = parser.parse_args()
 
     from src.pipeline import process_video
+    from src.tts import apply_line_sync_tts_defaults
     from src.utils import load_config
 
     config = load_config(args.config)
@@ -65,8 +76,12 @@ def main() -> int:
         config.tts.reference_wav = str(args.reference_wav)
     if args.reference_text:
         config.tts.reference_text = args.reference_text
+    if args.voxcpm2_base_url:
+        config.tts.voxcpm2_base_url = args.voxcpm2_base_url
     if args.disable_auto_reference:
         config.tts.auto_reference_from_source = False
+    if args.line_sync:
+        apply_line_sync_tts_defaults(config)
 
     output_path = process_video(args.video, config)
     print(output_path)

@@ -5,6 +5,7 @@ __pycache__/
 *.pyd
 *.egg-info/
 .env
+.claude/
 .DS_Store
 .cache/
 input/*
@@ -13,3 +14,6 @@ output/*
 !output/.gitkeep
 workspace/*
 !workspace/.gitkeep
+PLAN.md
+OPEN_SOURCE_RUNTIME_PLAN.md
+RELEASE_DRAFT.md

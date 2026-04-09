@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title>Video Localization Pipeline</title>
+  <desc>Icon for a short-video dubbing and alignment workflow.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF8A1C"/>
+      <stop offset="55%" stop-color="#FF5B3F"/>
+      <stop offset="100%" stop-color="#E7385D"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#FFF7F0"/>
+      <stop offset="100%" stop-color="#FFE0C9"/>
+    </linearGradient>
+  </defs>
+  <rect x="24" y="24" width="464" height="464" rx="108" fill="url(#bg)"/>
+  <rect x="110" y="118" width="170" height="276" rx="38" fill="url(#screen)"/>
+  <rect x="136" y="154" width="118" height="204" rx="18" fill="#FFFFFF"/>
+  <polygon points="196,208 314,256 196,304" fill="#FF5A3C"/>
+  <path d="M312 168c40 21 62 51 62 88s-22 67-62 88" fill="none" stroke="#FFFFFF" stroke-width="26" stroke-linecap="round"/>
+  <path d="M364 118c58 35 92 82 92 138s-34 103-92 138" fill="none" stroke="#FFFFFF" stroke-width="20" stroke-linecap="round" opacity="0.8"/>
+  <rect x="116" y="414" width="280" height="20" rx="10" fill="#FFFFFF" opacity="0.22"/>
+</svg>

@@ -5,6 +5,8 @@ import math
 import os
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +51,9 @@ def _translate_segments(segments: list[SubtitleSegment], config: AppConfig) -> l
 
     translated: list[str] = []
     for batch in batches:
-        if config.translate.provider == "claude_api":
+        if config.translate.provider == "openai_compatible":
+            translated.extend(_translate_batch_with_openai_compatible(batch, config))
+        elif config.translate.provider == "claude_api":
             translated.extend(_translate_batch_with_claude_api(batch, config))
         elif config.translate.provider == "claude_code":
             translated.extend(_translate_batch_with_claude_code(batch, config))
@@ -62,14 +66,25 @@ def _translate_segments(segments: list[SubtitleSegment], config: AppConfig) -> l
     return translated
 
 
-def _translate_batch_with_claude_api(batch: list[str], config: AppConfig) -> list[str]:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY is not set")
+def _translate_batch_with_openai_compatible(batch: list[str], config: AppConfig) -> list[str]:
+    prompt = {
+        "task": "Translate Simplified Chinese subtitles into natural spoken American English.",
+        "rules": [
+            "Preserve meaning and tone but prefer concise spoken English.",
+            "Do not add timestamps, numbering, commentary, or markdown.",
+            "Return valid JSON only.",
+            "Return exactly one translated string per input item, in the same order.",
+        ],
+        "items": [{"index": idx, "text": text} for idx, text in enumerate(batch)],
+        "output_schema": {"translations": ["string"]},
+    }
+    return _run_openai_compatible_translation_batch(batch, prompt, config)
 
+
+def _translate_batch_with_claude_api(batch: list[str], config: AppConfig) -> list[str]:
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=api_key)
+    client = _build_anthropic_client(config)
     prompt = {
         "task": "Translate Simplified Chinese subtitles into natural spoken American English.",
         "rules": [
@@ -118,7 +133,13 @@ def _enforce_wpm_limit(
     if not over_limit_indices:
         return translations
 
-    if config.translate.provider == "claude_api":
+    if config.translate.provider == "openai_compatible":
+        replacements = _compress_batch_with_openai_compatible(
+            [translations[index] for index in over_limit_indices],
+            [budgets[index] for index in over_limit_indices],
+            config,
+        )
+    elif config.translate.provider == "claude_api":
         replacements = _compress_batch_with_claude(
             [translations[index] for index in over_limit_indices],
             [budgets[index] for index in over_limit_indices],
@@ -151,7 +172,9 @@ def _smooth_translations(
     if not config.translate.contextual_smoothing:
         return translations
 
-    if config.translate.provider == "claude_api":
+    if config.translate.provider == "openai_compatible":
+        smoother = _smooth_batch_with_openai_compatible
+    elif config.translate.provider == "claude_api":
         smoother = _smooth_batch_with_claude
     elif config.translate.provider in {"claude_code", "claude"}:
         smoother = _smooth_batch_with_claude_code
@@ -180,18 +203,25 @@ def _smooth_translations(
     return smoothed
 
 
+def _compress_batch_with_openai_compatible(
+    texts: list[str],
+    budgets: list[int],
+    config: AppConfig,
+) -> list[str]:
+    return [_hard_word_cap(text, budget) for text, budget in zip(texts, budgets, strict=True)]
+
+
 def _compress_batch_with_claude(
     texts: list[str],
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not _has_anthropic_credentials(config):
         return [_hard_word_cap(text, budget) for text, budget in zip(texts, budgets, strict=True)]
 
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=api_key)
+    client = _build_anthropic_client(config)
     prompt = {
         "task": "Shorten subtitle lines so they are easier to read aloud in short-form video dubbing.",
         "rules": [
@@ -275,13 +305,12 @@ def _smooth_batch_with_claude(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not _has_anthropic_credentials(config):
         return translations
 
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=api_key)
+    client = _build_anthropic_client(config)
     prompt = {
         "task": "Rewrite consecutive subtitle slots into natural spoken American English.",
         "rules": [
@@ -359,6 +388,48 @@ def _smooth_batch_with_claude_code(
     return items
 
 
+def _smooth_batch_with_openai_compatible(
+    segments: list[SubtitleSegment],
+    translations: list[str],
+    budgets: list[int],
+    config: AppConfig,
+) -> list[str]:
+    prompt = {
+        "task": "Rewrite subtitle translations so neighboring lines sound natural when spoken continuously.",
+        "rules": [
+            "Keep each output aligned to the original subtitle slot count.",
+            "You may re-balance wording across adjacent lines to reduce awkward splits.",
+            "Preserve names, places, numbers, and factual meaning.",
+            "Do not exceed the requested max_words budget for each line.",
+            "Return valid JSON only.",
+        ],
+        "items": [
+            {
+                "index": idx,
+                "source_text": segment.text,
+                "draft_translation": translation,
+                "duration_ms": segment.end_ms - segment.start_ms,
+                "max_words": budget,
+            }
+            for idx, (segment, translation, budget) in enumerate(
+                zip(segments, translations, budgets, strict=True)
+            )
+        ],
+        "output_schema": {"translations": ["string"]},
+    }
+    payload = _run_openai_compatible_prompt(
+        prompt,
+        config,
+        system="You rewrite subtitle translations for dubbing. Output compact JSON and nothing else.",
+        max_tokens=_openai_compatible_rewrite_max_tokens(len(translations)),
+        temperature=0,
+    )
+    items = [str(item).strip() for item in payload.get("translations", [])]
+    if len(items) != len(translations):
+        return translations
+    return items
+
+
 def smooth_spoken_english_chunks(
     texts: list[str],
     durations_ms: list[int],
@@ -376,7 +447,9 @@ def smooth_spoken_english_chunks(
         for duration_ms in durations_ms
     ]
 
-    if config.translate.provider == "claude_api":
+    if config.translate.provider == "openai_compatible":
+        rewritten = _smooth_spoken_chunks_with_openai_compatible(texts, durations_ms, budgets, config)
+    elif config.translate.provider == "claude_api":
         rewritten = _smooth_spoken_chunks_with_claude(texts, durations_ms, budgets, config)
     elif config.translate.provider in {"claude_code", "claude"}:
         rewritten = _smooth_spoken_chunks_with_claude_code(texts, durations_ms, budgets, config)
@@ -397,13 +470,12 @@ def _smooth_spoken_chunks_with_claude(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    if not api_key:
+    if not _has_anthropic_credentials(config):
         return texts
 
     from anthropic import Anthropic
 
-    client = Anthropic(api_key=api_key)
+    client = _build_anthropic_client(config)
     prompt = {
         "task": "Rewrite each English dubbing chunk so it sounds natural when spoken aloud.",
         "rules": [
@@ -475,6 +547,47 @@ def _smooth_spoken_chunks_with_claude_code(
     return items
 
 
+def _smooth_spoken_chunks_with_openai_compatible(
+    texts: list[str],
+    durations_ms: list[int],
+    budgets: list[int],
+    config: AppConfig,
+) -> list[str]:
+    prompt = {
+        "task": "Rewrite each English dubbing chunk so it sounds natural when spoken aloud.",
+        "rules": [
+            "Preserve names, places, dates, and factual meaning.",
+            "Keep each chunk as one natural spoken sentence or phrase.",
+            "Fix awkward joins caused by subtitle splitting.",
+            "Do not exceed the requested max_words budget for each chunk.",
+            "Return valid JSON only.",
+        ],
+        "items": [
+            {
+                "index": idx,
+                "text": text,
+                "duration_ms": duration_ms,
+                "max_words": budget,
+            }
+            for idx, (text, duration_ms, budget) in enumerate(
+                zip(texts, durations_ms, budgets, strict=True)
+            )
+        ],
+        "output_schema": {"translations": ["string"]},
+    }
+    payload = _run_openai_compatible_prompt(
+        prompt,
+        config,
+        system="You rewrite English dubbing chunks. Output compact JSON and nothing else.",
+        max_tokens=_openai_compatible_rewrite_max_tokens(len(texts)),
+        temperature=0,
+    )
+    items = [str(item).strip() for item in payload.get("translations", [])]
+    if len(items) != len(texts):
+        return texts
+    return items
+
+
 def _run_claude_code_prompt(prompt: dict[str, Any], config: AppConfig) -> dict[str, Any]:
     command_prefix = [
         config.translate.claude_code_bin,
@@ -520,6 +633,164 @@ def _invoke_claude_code(cmd: list[str], prompt_text: str) -> tuple[dict[str, Any
 
     raw_result = str(wrapper.get("result", "")).strip()
     return _extract_json_payload(raw_result), None
+
+
+def _run_openai_compatible_prompt(
+    prompt: dict[str, Any],
+    config: AppConfig,
+    *,
+    system: str,
+    max_tokens: int,
+    temperature: float,
+) -> dict[str, Any]:
+    api_key = os.getenv(config.translate.api_key_env)
+    if not api_key:
+        raise RuntimeError(f"{config.translate.api_key_env} is not set")
+
+    base_url = config.translate.api_base_url.rstrip("/")
+    last_parse_error: Exception | None = None
+    for _ in range(3):
+        request_body = {
+            "model": config.translate.model,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "stream": False,
+        }
+        request = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=json.dumps(request_body).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(
+                request,
+                timeout=config.translate.request_timeout_seconds,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                f"OpenAI-compatible request failed with HTTP {exc.code}: {error_body or exc.reason}"
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise RuntimeError(f"OpenAI-compatible request failed: {exc.reason}") from exc
+
+        choices = payload.get("choices") or []
+        if not choices:
+            raise RuntimeError("OpenAI-compatible response did not contain any choices")
+
+        message = choices[0].get("message") or {}
+        content = message.get("content", "")
+        if isinstance(content, list):
+            text_parts = [
+                str(item.get("text", ""))
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            ]
+            content = "".join(text_parts).strip()
+        else:
+            content = str(content).strip()
+
+        if not content:
+            raise RuntimeError("OpenAI-compatible response did not contain message content")
+
+        try:
+            return _extract_json_payload(content)
+        except (RuntimeError, json.JSONDecodeError) as exc:
+            last_parse_error = exc
+
+    raise RuntimeError(
+        f"OpenAI-compatible response did not contain valid JSON: {last_parse_error}"
+    )
+
+
+def _run_openai_compatible_translation_batch(
+    batch: list[str],
+    prompt: dict[str, Any],
+    config: AppConfig,
+) -> list[str]:
+    payload = _run_openai_compatible_prompt(
+        prompt,
+        config,
+        system="You translate subtitle text for short-form videos. Output compact JSON and nothing else.",
+        max_tokens=_openai_compatible_translation_max_tokens(len(batch)),
+        temperature=config.translate.temperature,
+    )
+    translations = [str(item).strip() for item in payload.get("translations", [])]
+    if len(translations) == len(batch):
+        return translations
+    if len(batch) == 1:
+        raise RuntimeError(
+            "OpenAI-compatible provider returned the wrong number of translations for a single-item batch"
+        )
+
+    midpoint = max(1, len(batch) // 2)
+    left_batch = batch[:midpoint]
+    right_batch = batch[midpoint:]
+    left_prompt = {
+        **prompt,
+        "items": [{"index": idx, "text": text} for idx, text in enumerate(left_batch)],
+    }
+    right_prompt = {
+        **prompt,
+        "items": [{"index": idx, "text": text} for idx, text in enumerate(right_batch)],
+    }
+    return _run_openai_compatible_translation_batch(
+        left_batch,
+        left_prompt,
+        config,
+    ) + _run_openai_compatible_translation_batch(
+        right_batch,
+        right_prompt,
+        config,
+    )
+
+
+def _openai_compatible_translation_max_tokens(item_count: int) -> int:
+    return min(1536, max(512, item_count * 96))
+
+
+def _openai_compatible_rewrite_max_tokens(item_count: int) -> int:
+    return min(2048, max(512, item_count * 96))
+
+
+def _has_anthropic_credentials(config: AppConfig) -> bool:
+    return bool(
+        os.getenv(config.translate.anthropic_api_key_env)
+        or os.getenv(config.translate.anthropic_auth_token_env)
+    )
+
+
+def _build_anthropic_client(config: AppConfig) -> Any:
+    api_key = os.getenv(config.translate.anthropic_api_key_env)
+    auth_token = os.getenv(config.translate.anthropic_auth_token_env)
+    if not api_key and not auth_token:
+        raise RuntimeError(
+            f"Neither {config.translate.anthropic_api_key_env} nor "
+            f"{config.translate.anthropic_auth_token_env} is set"
+        )
+
+    from anthropic import Anthropic
+
+    kwargs: dict[str, Any] = {
+        "timeout": float(config.translate.request_timeout_seconds),
+    }
+    if config.translate.anthropic_base_url:
+        kwargs["base_url"] = config.translate.anthropic_base_url
+    if api_key:
+        kwargs["api_key"] = api_key
+    if auth_token:
+        kwargs["auth_token"] = auth_token
+
+    return Anthropic(**kwargs)
 
 
 def _response_text(response: object) -> str:

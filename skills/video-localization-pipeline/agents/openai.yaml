@@ -1,0 +1,10 @@
+interface:
+  display_name: "Video Localization Pipeline"
+  short_description: "Operate a compatible multilingual video localization runtime"
+  icon_small: "./assets/video-localization-pipeline-small.svg"
+  icon_large: "./assets/video-localization-pipeline.svg"
+  brand_color: "#FF5B3F"
+  default_prompt: "Use $video-localization-pipeline to operate a compatible video localization runtime repo: generate a localized version of this video, inspect manifest outputs, or debug line-sync timing."
+
+policy:
+  allow_implicit_invocation: true

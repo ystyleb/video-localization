@@ -154,14 +154,20 @@ class AsrConfig:
 
 @dataclass(slots=True)
 class TranslateConfig:
-    provider: str = "claude_code"
-    model: str = "sonnet"
+    provider: str = "openai_compatible"
+    model: str = "gpt-4.1-mini"
     batch_size: int = 30
     max_words_per_minute: int = 140
     contextual_smoothing: bool = True
     temperature: float = 0.1
+    api_base_url: str = "https://api.openai.com/v1"
+    api_key_env: str = "OPENAI_API_KEY"
+    request_timeout_seconds: int = 180
+    anthropic_base_url: str | None = None
+    anthropic_api_key_env: str = "ANTHROPIC_API_KEY"
+    anthropic_auth_token_env: str = "ANTHROPIC_AUTH_TOKEN"
     claude_code_bin: str = "claude"
-    claude_code_permission_mode: str = "bypassPermissions"
+    claude_code_permission_mode: str = "default"
     claude_code_tools: str = ""
 
 
@@ -200,6 +206,7 @@ class TtsConfig:
     vibevoice_cfg_scale: float = 1.5
     voxcpm2_command: str | None = None
     voxcpm2_base_url: str = "http://127.0.0.1:8000"
+    voxcpm_hf_model_id: str = "openbmb/VoxCPM-0.5B"
     kokoro_command: str | None = None
     macos_voice: str = "Samantha"
 

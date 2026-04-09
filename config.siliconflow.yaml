@@ -31,14 +31,14 @@ asr:
 
 translate:
   provider: openai_compatible
-  model: gpt-4.1-mini
-  batch_size: 30
+  model: deepseek-ai/DeepSeek-V3.2
+  batch_size: 5
   max_words_per_minute: 140
-  contextual_smoothing: true
+  contextual_smoothing: false
   temperature: 0.1
-  api_base_url: https://api.openai.com/v1
-  api_key_env: OPENAI_API_KEY
-  request_timeout_seconds: 180
+  api_base_url: https://api.siliconflow.cn/v1
+  api_key_env: SILICONFLOW_API_KEY
+  request_timeout_seconds: 60
   anthropic_base_url: null
   anthropic_api_key_env: ANTHROPIC_API_KEY
   anthropic_auth_token_env: ANTHROPIC_AUTH_TOKEN
@@ -69,6 +69,8 @@ tts:
   vibevoice_device: auto
   vibevoice_cfg_scale: 1.5
   voxcpm2_command: null
+  voxcpm2_base_url: http://127.0.0.1:8000
+  voxcpm_hf_model_id: openbmb/VoxCPM-0.5B
   kokoro_command: null
   macos_voice: Samantha
 

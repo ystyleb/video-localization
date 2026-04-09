@@ -76,6 +76,15 @@ DANGLING_END_WORDS = {
 }
 
 
+def apply_line_sync_tts_defaults(config: AppConfig) -> AppConfig:
+    """Bias TTS toward one subtitle line per synthesis chunk."""
+    config.tts.min_segment_chars = 0
+    config.tts.merge_gap_ms = 0
+    config.tts.sentence_aware_merge = False
+    config.tts.smooth_merged_text = False
+    return config
+
+
 def generate_voiceover(
     en_srt: Path,
     output_wav: Path,
@@ -493,6 +502,7 @@ def _synthesize_with_command(
             "python_bin": sys.executable,
             "voxcpm2_base_url": config.tts.voxcpm2_base_url,
             "voxcpm2_runner": project_root() / "scripts" / "voxcpm_http_tts.py",
+            "voxcpm_hf_model_id": config.tts.voxcpm_hf_model_id,
         },
     )
     run_command(command)
@@ -503,17 +513,29 @@ def _synthesize_with_command(
 def _default_tts_command_template(provider_name: str) -> str | None:
     if provider_name != "voxcpm2":
         return None
+    if command_path("voxcpm"):
+        return (
+            "voxcpm clone "
+            "--hf-model-id {voxcpm_hf_model_id} "
+            "--text {text} "
+            "--prompt-audio {reference_wav} "
+            "--prompt-text {reference_text} "
+            "--output {output_path} "
+            "--no-denoiser "
+            "--no-optimize"
+        )
+
     runner = project_root() / "scripts" / "voxcpm_http_tts.py"
-    if not runner.exists():
-        return None
-    return (
-        "{python_bin} {voxcpm2_runner} "
-        "--base-url {voxcpm2_base_url} "
-        "--text-file {text_file} "
-        "--output {output_path} "
-        "--prompt-wav-path {reference_wav} "
-        "--prompt-text {reference_text}"
-    )
+    if runner.exists():
+        return (
+            "{python_bin} {voxcpm2_runner} "
+            "--base-url {voxcpm2_base_url} "
+            "--text-file {text_file} "
+            "--output {output_path} "
+            "--prompt-wav-path {reference_wav} "
+            "--prompt-text {reference_text}"
+        )
+    return None
 
 
 def _synthesize_with_vibevoice_realtime(

@@ -37,17 +37,44 @@ def main() -> int:
     add_row("ffmpeg", bool(command_path(config.runtime.ffmpeg_bin)), config.runtime.ffmpeg_bin)
     add_row("ffprobe", bool(command_path(config.runtime.ffprobe_bin)), config.runtime.ffprobe_bin)
 
-    if config.translate.provider in {"claude_code", "claude"}:
+    if config.translate.provider == "openai_compatible":
+        add_row(
+            f"translate.env:{config.translate.api_key_env}",
+            bool(os.getenv(config.translate.api_key_env)),
+            (
+                f"set {config.translate.api_key_env} for {config.translate.api_base_url}"
+                if config.translate.api_base_url
+                else f"set {config.translate.api_key_env}"
+            ),
+        )
+        add_row(
+            "translate.api_base_url",
+            bool(config.translate.api_base_url),
+            config.translate.api_base_url or "set translate.api_base_url",
+        )
+    elif config.translate.provider in {"claude_code", "claude"}:
         add_row(
             "translate.claude_code_bin",
             bool(command_path(config.translate.claude_code_bin)),
             config.translate.claude_code_bin,
         )
     elif config.translate.provider == "claude_api":
+        has_auth = bool(
+            os.getenv(config.translate.anthropic_api_key_env)
+            or os.getenv(config.translate.anthropic_auth_token_env)
+        )
         add_row(
-            "ANTHROPIC_API_KEY",
-            bool(os.getenv("ANTHROPIC_API_KEY")),
-            "set in environment for claude_api provider",
+            "translate.anthropic_auth",
+            has_auth,
+            (
+                f"set {config.translate.anthropic_api_key_env} or "
+                f"{config.translate.anthropic_auth_token_env} for claude_api provider"
+            ),
+        )
+        add_row(
+            "translate.anthropic_base_url",
+            bool(config.translate.anthropic_base_url),
+            config.translate.anthropic_base_url or "use Anthropic default endpoint",
         )
 
     _check_asr_provider(config, add_row, module_available)
