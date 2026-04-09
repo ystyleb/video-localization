@@ -137,6 +137,36 @@ This repo includes a built-in agent skill under `skills/video-localization-pipel
 
 The skill helps agents operate this runtime — it does not replace it.
 
+## Give This Repo To An Agent
+
+Usually yes: if your agent has shell access, git access, and permission to install local dependencies, you can give it this repo URL and ask it to set up the runtime for you:
+
+- Repo: `https://github.com/ystyleb/video-localization`
+
+What the agent can usually do:
+
+- clone the repo
+- run `uv sync`
+- install the built-in skill
+- run `scripts.doctor`
+- set up and run `scripts.process_single` or `scripts.debug_alignment`
+
+What the agent still needs from you:
+
+- API keys such as `OPENAI_API_KEY` or `SILICONFLOW_API_KEY`
+- approval for large model downloads or system packages like `ffmpeg`
+- an actual input video file to process
+
+Suggested prompt:
+
+```text
+Clone https://github.com/ystyleb/video-localization and set it up on this machine.
+Install dependencies, run scripts.doctor, tell me what is still missing, then install the built-in agent skill and process a test video if input/sample.mp4 exists.
+If API keys or model downloads are required, stop and tell me exactly what you need.
+```
+
+Best practice: let the agent clone and prepare the repo first, then have it install the built-in skill from inside the checked-out repo. The skill helps the agent operate the runtime; it is not a standalone replacement for the runtime itself.
+
 ## License
 
 [MIT](LICENSE)

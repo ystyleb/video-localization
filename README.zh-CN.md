@@ -130,6 +130,36 @@ uv run python -m scripts.process_batch
 - 读取 `workspace/<video>/manifest.json` 做定位
 - 在需要时用 `scripts.debug_alignment` 做局部调试
 
+## 直接把仓库链接丢给 Agent 行不行
+
+通常可以，但要满足一个前提：这个 Agent 得有 shell、git，以及安装本地依赖的能力。满足这些条件时，你可以直接把仓库链接发给 Agent，让它先把 runtime 装起来：
+
+- 仓库地址：`https://github.com/ystyleb/video-localization`
+
+Agent 通常可以帮你做：
+
+- clone 仓库
+- 执行 `uv sync`
+- 安装仓库内置 skill
+- 跑 `scripts.doctor`
+- 配置并执行 `scripts.process_single` 或 `scripts.debug_alignment`
+
+但下面这些通常还是需要你来提供或确认：
+
+- `OPENAI_API_KEY`、`SILICONFLOW_API_KEY` 之类的密钥
+- `ffmpeg` 或大模型下载这类系统依赖 / 大体积依赖的安装许可
+- 实际要处理的视频文件
+
+推荐直接给 Agent 这样的提示词：
+
+```text
+Clone https://github.com/ystyleb/video-localization and set it up on this machine.
+Install dependencies, run scripts.doctor, tell me what is still missing, then install the built-in agent skill and process a test video if input/sample.mp4 exists.
+If API keys or model downloads are required, stop and tell me exactly what you need.
+```
+
+更稳妥的做法是：先让 Agent clone 并准备好这个仓库，再让它在仓库目录里安装内置 skill。skill 的作用是帮助 Agent 更稳定地操作这个 runtime，不是脱离 runtime 单独工作的替代品。
+
 ## 当前 provider 约定
 
 ### 翻译
