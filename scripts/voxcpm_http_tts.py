@@ -33,7 +33,7 @@ def main() -> int:
     args = parser.parse_args()
 
     payload = {
-        "model": "voxcpm-0.5b",
+        "model": "voxcpm2",
         "input": args.text_file.read_text(encoding="utf-8").strip(),
         "response_format": args.response_format,
         "max_length": args.max_length,

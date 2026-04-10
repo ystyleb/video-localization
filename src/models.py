@@ -157,6 +157,8 @@ class TranslateConfig:
     provider: str = "openai_compatible"
     model: str = "gpt-4.1-mini"
     batch_size: int = 30
+    target_language: str = "en"
+    target_language_name: str = "natural spoken American English"
     max_words_per_minute: int = 140
     contextual_smoothing: bool = True
     temperature: float = 0.1
@@ -206,7 +208,7 @@ class TtsConfig:
     vibevoice_cfg_scale: float = 1.5
     voxcpm2_command: str | None = None
     voxcpm2_base_url: str = "http://127.0.0.1:8000"
-    voxcpm_hf_model_id: str = "openbmb/VoxCPM-0.5B"
+    voxcpm_hf_model_id: str = "openbmb/VoxCPM2"
     kokoro_command: str | None = None
     macos_voice: str = "Samantha"
 

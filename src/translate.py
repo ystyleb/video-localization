@@ -13,6 +13,57 @@ from typing import Any
 from .models import AppConfig, SubtitleSegment
 from .subtitle import parse_srt, write_srt
 
+# Per-language speech rate: (units_per_minute, unit_type)
+# "words" = split by spaces/regex, "chars" = character count (for CJK/Thai etc.)
+DEFAULT_SPEECH_RATES: dict[str, tuple[int, str]] = {
+    "en": (140, "words"),
+    "ja": (350, "chars"),
+    "fr": (160, "words"),
+    "ko": (280, "chars"),
+    "es": (160, "words"),
+    "de": (130, "words"),
+    "ru": (130, "words"),
+    "ar": (140, "words"),
+    "th": (280, "chars"),
+    "pt": (150, "words"),
+    "zh": (250, "chars"),
+}
+
+# Language display names for translation prompts
+LANGUAGE_NAMES: dict[str, str] = {
+    "en": "natural spoken American English",
+    "ja": "natural spoken Japanese",
+    "fr": "natural spoken French",
+    "ko": "natural spoken Korean",
+    "es": "natural spoken Spanish",
+    "de": "natural spoken German",
+    "ru": "natural spoken Russian",
+    "ar": "natural spoken Arabic",
+    "th": "natural spoken Thai",
+    "pt": "natural spoken Brazilian Portuguese",
+    "it": "natural spoken Italian",
+    "vi": "natural spoken Vietnamese",
+    "id": "natural spoken Indonesian",
+    "hi": "natural spoken Hindi",
+    "tr": "natural spoken Turkish",
+}
+
+
+def _target_language_name(config: AppConfig) -> str:
+    """Return the target language display name from config or built-in lookup."""
+    return (
+        config.translate.target_language_name
+        or LANGUAGE_NAMES.get(config.translate.target_language, f"natural spoken {config.translate.target_language}")
+    )
+
+
+def _speech_rate_for_language(config: AppConfig) -> tuple[int, str]:
+    """Return (units_per_minute, unit_type) for the target language."""
+    lang = config.translate.target_language
+    if lang in DEFAULT_SPEECH_RATES:
+        return DEFAULT_SPEECH_RATES[lang]
+    return (config.translate.max_words_per_minute, "words")
+
 
 def translate_srt(zh_srt: Path, en_srt: Path, config: AppConfig) -> dict[str, Any]:
     segments = parse_srt(zh_srt)
@@ -67,10 +118,11 @@ def _translate_segments(segments: list[SubtitleSegment], config: AppConfig) -> l
 
 
 def _translate_batch_with_openai_compatible(batch: list[str], config: AppConfig) -> list[str]:
+    lang_name = _target_language_name(config)
     prompt = {
-        "task": "Translate Simplified Chinese subtitles into natural spoken American English.",
+        "task": f"Translate Simplified Chinese subtitles into {lang_name}.",
         "rules": [
-            "Preserve meaning and tone but prefer concise spoken English.",
+            f"Preserve meaning and tone but prefer concise spoken {lang_name}.",
             "Do not add timestamps, numbering, commentary, or markdown.",
             "Return valid JSON only.",
             "Return exactly one translated string per input item, in the same order.",
@@ -84,11 +136,12 @@ def _translate_batch_with_openai_compatible(batch: list[str], config: AppConfig)
 def _translate_batch_with_claude_api(batch: list[str], config: AppConfig) -> list[str]:
     from anthropic import Anthropic
 
+    lang_name = _target_language_name(config)
     client = _build_anthropic_client(config)
     prompt = {
-        "task": "Translate Simplified Chinese subtitles into natural spoken American English.",
+        "task": f"Translate Simplified Chinese subtitles into {lang_name}.",
         "rules": [
-            "Preserve meaning and tone but prefer concise spoken English.",
+            f"Preserve meaning and tone but prefer concise spoken {lang_name}.",
             "Do not add timestamps, numbering, commentary, or markdown.",
             "Return valid JSON only.",
             "Return exactly one translated string per input item, in the same order.",
@@ -121,13 +174,14 @@ def _enforce_wpm_limit(
     translations: list[str],
     config: AppConfig,
 ) -> list[str]:
+    _, unit_type = _speech_rate_for_language(config)
     over_limit_indices: list[int] = []
     budgets: dict[int, int] = {}
 
     for index, (segment, translation) in enumerate(zip(segments, translations, strict=True)):
-        budget = _segment_word_budget(segment, config)
+        budget, _ = _segment_unit_budget(segment, config)
         budgets[index] = budget
-        if _count_words(translation) > budget:
+        if _count_units(translation, unit_type) > budget:
             over_limit_indices.append(index)
 
     if not over_limit_indices:
@@ -153,7 +207,7 @@ def _enforce_wpm_limit(
         )
     else:
         replacements = [
-            _hard_word_cap(translations[index], budgets[index]) for index in over_limit_indices
+            _hard_unit_cap(translations[index], budgets[index], unit_type) for index in over_limit_indices
         ]
 
     updated = list(translations)
@@ -216,23 +270,26 @@ def _compress_batch_with_claude(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
+    _, unit_type = _speech_rate_for_language(config)
     if not _has_anthropic_credentials(config):
-        return [_hard_word_cap(text, budget) for text, budget in zip(texts, budgets, strict=True)]
+        return [_hard_unit_cap(text, budget, unit_type) for text, budget in zip(texts, budgets, strict=True)]
 
     from anthropic import Anthropic
 
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
+    budget_rule = f"Do not exceed the requested {budget_label} budget for each line."
     client = _build_anthropic_client(config)
     prompt = {
         "task": "Shorten subtitle lines so they are easier to read aloud in short-form video dubbing.",
         "rules": [
             "Keep the same meaning.",
             "Stay natural and conversational.",
-            "Do not exceed the requested word budget for each line.",
+            budget_rule,
             "Avoid broken words and obviously dangling clause endings.",
             "Return valid JSON only.",
         ],
         "items": [
-            {"index": idx, "text": text, "max_words": budget}
+            {"index": idx, "text": text, budget_label: budget}
             for idx, (text, budget) in enumerate(zip(texts, budgets, strict=True))
         ],
         "output_schema": {"translations": ["string"]},
@@ -247,15 +304,16 @@ def _compress_batch_with_claude(
     payload = _extract_json_payload(_response_text(response))
     items = [str(item).strip() for item in payload.get("translations", [])]
     if len(items) != len(texts):
-        return [_hard_word_cap(text, budget) for text, budget in zip(texts, budgets, strict=True)]
-    return [_hard_word_cap(text, budget) for text, budget in zip(items, budgets, strict=True)]
+        return [_hard_unit_cap(text, budget, unit_type) for text, budget in zip(texts, budgets, strict=True)]
+    return [_hard_unit_cap(text, budget, unit_type) for text, budget in zip(items, budgets, strict=True)]
 
 
 def _translate_batch_with_claude_code(batch: list[str], config: AppConfig) -> list[str]:
+    lang_name = _target_language_name(config)
     prompt = {
-        "task": "Translate Simplified Chinese subtitles into natural spoken American English.",
+        "task": f"Translate Simplified Chinese subtitles into {lang_name}.",
         "rules": [
-            "Preserve meaning and tone but prefer concise spoken English.",
+            f"Preserve meaning and tone but prefer concise spoken {lang_name}.",
             "Do not add timestamps, numbering, commentary, or markdown.",
             "Return valid JSON only.",
             "Return exactly one translated string per input item, in the same order.",
@@ -277,17 +335,20 @@ def _compress_batch_with_claude_code(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
+    budget_rule = f"Do not exceed the requested {budget_label} budget for each line."
     prompt = {
         "task": "Shorten subtitle lines so they are easier to read aloud in short-form video dubbing.",
         "rules": [
             "Keep the same meaning.",
             "Stay natural and conversational.",
-            "Do not exceed the requested word budget for each line.",
+            budget_rule,
             "Avoid broken words and obviously dangling clause endings.",
             "Return valid JSON only.",
         ],
         "items": [
-            {"index": idx, "text": text, "max_words": budget}
+            {"index": idx, "text": text, budget_label: budget}
             for idx, (text, budget) in enumerate(zip(texts, budgets, strict=True))
         ],
         "output_schema": {"translations": ["string"]},
@@ -295,8 +356,8 @@ def _compress_batch_with_claude_code(
     payload = _run_claude_code_prompt(prompt, config)
     items = [str(item).strip() for item in payload.get("translations", [])]
     if len(items) != len(texts):
-        return [_hard_word_cap(text, budget) for text, budget in zip(texts, budgets, strict=True)]
-    return [_hard_word_cap(text, budget) for text, budget in zip(items, budgets, strict=True)]
+        return [_hard_unit_cap(text, budget, unit_type) for text, budget in zip(texts, budgets, strict=True)]
+    return [_hard_unit_cap(text, budget, unit_type) for text, budget in zip(items, budgets, strict=True)]
 
 
 def _smooth_batch_with_claude(
@@ -310,16 +371,19 @@ def _smooth_batch_with_claude(
 
     from anthropic import Anthropic
 
+    lang_name = _target_language_name(config)
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
     client = _build_anthropic_client(config)
     prompt = {
-        "task": "Rewrite consecutive subtitle slots into natural spoken American English.",
+        "task": f"Rewrite consecutive subtitle slots into {lang_name}.",
         "rules": [
             "Treat the full item list as one continuous narration.",
             "Preserve names, places, dates, and factual meaning from the Chinese source.",
-            "You may redistribute words across neighboring subtitle slots, but return exactly one English string per input item in the same order.",
+            f"You may redistribute words across neighboring subtitle slots, but return exactly one {lang_name} string per input item in the same order.",
             "Keep each line concise and easy to read aloud.",
             "Avoid broken words, dangling articles, and obviously unfinished clause endings when possible.",
-            "Do not exceed the requested max_words budget for each line.",
+            f"Do not exceed the requested {budget_label} budget for each line.",
             "Return valid JSON only.",
         ],
         "items": [
@@ -328,7 +392,7 @@ def _smooth_batch_with_claude(
                 "source_text": segment.text,
                 "current_translation": translation,
                 "duration_ms": segment.end_ms - segment.start_ms,
-                "max_words": budget,
+                budget_label: budget,
             }
             for idx, (segment, translation, budget) in enumerate(
                 zip(segments, translations, budgets, strict=True)
@@ -356,15 +420,18 @@ def _smooth_batch_with_claude_code(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
+    lang_name = _target_language_name(config)
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
     prompt = {
-        "task": "Rewrite consecutive subtitle slots into natural spoken American English.",
+        "task": f"Rewrite consecutive subtitle slots into {lang_name}.",
         "rules": [
             "Treat the full item list as one continuous narration.",
             "Preserve names, places, dates, and factual meaning from the Chinese source.",
-            "You may redistribute words across neighboring subtitle slots, but return exactly one English string per input item in the same order.",
+            f"You may redistribute words across neighboring subtitle slots, but return exactly one {lang_name} string per input item in the same order.",
             "Keep each line concise and easy to read aloud.",
             "Avoid broken words, dangling articles, and obviously unfinished clause endings when possible.",
-            "Do not exceed the requested max_words budget for each line.",
+            f"Do not exceed the requested {budget_label} budget for each line.",
             "Return valid JSON only.",
         ],
         "items": [
@@ -373,7 +440,7 @@ def _smooth_batch_with_claude_code(
                 "source_text": segment.text,
                 "current_translation": translation,
                 "duration_ms": segment.end_ms - segment.start_ms,
-                "max_words": budget,
+                budget_label: budget,
             }
             for idx, (segment, translation, budget) in enumerate(
                 zip(segments, translations, budgets, strict=True)
@@ -394,13 +461,16 @@ def _smooth_batch_with_openai_compatible(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
+    lang_name = _target_language_name(config)
     prompt = {
-        "task": "Rewrite subtitle translations so neighboring lines sound natural when spoken continuously.",
+        "task": f"Rewrite subtitle translations into {lang_name} so neighboring lines sound natural when spoken continuously.",
         "rules": [
             "Keep each output aligned to the original subtitle slot count.",
             "You may re-balance wording across adjacent lines to reduce awkward splits.",
             "Preserve names, places, numbers, and factual meaning.",
-            "Do not exceed the requested max_words budget for each line.",
+            f"Do not exceed the requested {budget_label} budget for each line.",
             "Return valid JSON only.",
         ],
         "items": [
@@ -409,7 +479,7 @@ def _smooth_batch_with_openai_compatible(
                 "source_text": segment.text,
                 "draft_translation": translation,
                 "duration_ms": segment.end_ms - segment.start_ms,
-                "max_words": budget,
+                budget_label: budget,
             }
             for idx, (segment, translation, budget) in enumerate(
                 zip(segments, translations, budgets, strict=True)
@@ -442,8 +512,9 @@ def smooth_spoken_english_chunks(
     if len(texts) <= 1:
         return [text.strip() for text in texts]
 
+    rate, unit_type = _speech_rate_for_language(config)
     budgets = [
-        max(1, math.floor(max(duration_ms / 60_000, 0.01) * config.translate.max_words_per_minute))
+        max(1, math.floor(max(duration_ms / 60_000, 0.01) * rate))
         for duration_ms in durations_ms
     ]
 
@@ -459,7 +530,7 @@ def smooth_spoken_english_chunks(
     if len(rewritten) != len(texts):
         return [text.strip() for text in texts]
     return [
-        _hard_word_cap(str(text).strip(), budget)
+        _hard_unit_cap(str(text).strip(), budget, unit_type)
         for text, budget in zip(rewritten, budgets, strict=True)
     ]
 
@@ -475,14 +546,16 @@ def _smooth_spoken_chunks_with_claude(
 
     from anthropic import Anthropic
 
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
     client = _build_anthropic_client(config)
     prompt = {
-        "task": "Rewrite each English dubbing chunk so it sounds natural when spoken aloud.",
+        "task": "Rewrite each dubbing chunk so it sounds natural when spoken aloud.",
         "rules": [
             "Preserve names, places, dates, and factual meaning.",
             "Keep each chunk as one natural spoken sentence or phrase.",
             "Fix awkward joins caused by subtitle splitting.",
-            "Do not exceed the requested max_words budget for each chunk.",
+            f"Do not exceed the requested {budget_label} budget for each chunk.",
             "Return valid JSON only.",
         ],
         "items": [
@@ -490,7 +563,7 @@ def _smooth_spoken_chunks_with_claude(
                 "index": idx,
                 "text": text,
                 "duration_ms": duration_ms,
-                "max_words": budget,
+                budget_label: budget,
             }
             for idx, (text, duration_ms, budget) in enumerate(
                 zip(texts, durations_ms, budgets, strict=True)
@@ -502,7 +575,7 @@ def _smooth_spoken_chunks_with_claude(
         model=config.translate.model,
         max_tokens=4096,
         temperature=0,
-        system="You rewrite English dubbing chunks. Output compact JSON and nothing else.",
+        system="You rewrite dubbing chunks for video localization. Output compact JSON and nothing else.",
         messages=[{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
     )
     payload = _extract_json_payload(_response_text(response))
@@ -518,13 +591,15 @@ def _smooth_spoken_chunks_with_claude_code(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
     prompt = {
-        "task": "Rewrite each English dubbing chunk so it sounds natural when spoken aloud.",
+        "task": "Rewrite each dubbing chunk so it sounds natural when spoken aloud.",
         "rules": [
             "Preserve names, places, dates, and factual meaning.",
             "Keep each chunk as one natural spoken sentence or phrase.",
             "Fix awkward joins caused by subtitle splitting.",
-            "Do not exceed the requested max_words budget for each chunk.",
+            f"Do not exceed the requested {budget_label} budget for each chunk.",
             "Return valid JSON only.",
         ],
         "items": [
@@ -532,7 +607,7 @@ def _smooth_spoken_chunks_with_claude_code(
                 "index": idx,
                 "text": text,
                 "duration_ms": duration_ms,
-                "max_words": budget,
+                budget_label: budget,
             }
             for idx, (text, duration_ms, budget) in enumerate(
                 zip(texts, durations_ms, budgets, strict=True)
@@ -553,13 +628,15 @@ def _smooth_spoken_chunks_with_openai_compatible(
     budgets: list[int],
     config: AppConfig,
 ) -> list[str]:
+    _, unit_type = _speech_rate_for_language(config)
+    budget_label = "max_chars" if unit_type == "chars" else "max_words"
     prompt = {
-        "task": "Rewrite each English dubbing chunk so it sounds natural when spoken aloud.",
+        "task": "Rewrite each dubbing chunk so it sounds natural when spoken aloud.",
         "rules": [
             "Preserve names, places, dates, and factual meaning.",
             "Keep each chunk as one natural spoken sentence or phrase.",
             "Fix awkward joins caused by subtitle splitting.",
-            "Do not exceed the requested max_words budget for each chunk.",
+            f"Do not exceed the requested {budget_label} budget for each chunk.",
             "Return valid JSON only.",
         ],
         "items": [
@@ -567,7 +644,7 @@ def _smooth_spoken_chunks_with_openai_compatible(
                 "index": idx,
                 "text": text,
                 "duration_ms": duration_ms,
-                "max_words": budget,
+                budget_label: budget,
             }
             for idx, (text, duration_ms, budget) in enumerate(
                 zip(texts, durations_ms, budgets, strict=True)
@@ -578,7 +655,7 @@ def _smooth_spoken_chunks_with_openai_compatible(
     payload = _run_openai_compatible_prompt(
         prompt,
         config,
-        system="You rewrite English dubbing chunks. Output compact JSON and nothing else.",
+        system="You rewrite dubbing chunks for video localization. Output compact JSON and nothing else.",
         max_tokens=_openai_compatible_rewrite_max_tokens(len(texts)),
         temperature=0,
     )
@@ -815,17 +892,50 @@ def _extract_json_payload(text: str) -> dict[str, Any]:
     return payload
 
 
-def _count_words(text: str) -> int:
+def _count_units(text: str, unit_type: str = "words") -> int:
+    """Count text units: words (space-delimited) or chars (for CJK/Thai)."""
+    if unit_type == "chars":
+        return len(text.replace(" ", ""))
     return len(re.findall(r"\b[\w'-]+\b", text))
 
 
-def _segment_word_budget(segment: SubtitleSegment, config: AppConfig) -> int:
+def _count_words(text: str) -> int:
+    """Count words — delegates to _count_units with the config's target language."""
+    return len(re.findall(r"\b[\w'-]+\b", text))
+
+
+def _segment_unit_budget(segment: SubtitleSegment, config: AppConfig) -> tuple[int, str]:
+    """Return (budget, unit_type) for a segment based on target language speech rate."""
+    rate, unit_type = _speech_rate_for_language(config)
     duration_minutes = max((segment.end_ms - segment.start_ms) / 60_000, 0.01)
-    return max(1, math.floor(duration_minutes * config.translate.max_words_per_minute))
+    return max(1, math.floor(duration_minutes * rate)), unit_type
 
 
-def _hard_word_cap(text: str, budget: int) -> str:
+def _segment_word_budget(segment: SubtitleSegment, config: AppConfig) -> int:
+    """Legacy word budget — returns just the number for backward compatibility."""
+    budget, _ = _segment_unit_budget(segment, config)
+    return budget
+
+
+def _hard_unit_cap(text: str, budget: int, unit_type: str = "words") -> str:
+    """Truncate text to fit within budget units."""
+    if unit_type == "chars":
+        # Count non-space characters but preserve original text structure
+        count = 0
+        cut_index = len(text)
+        for i, ch in enumerate(text):
+            if ch != " ":
+                count += 1
+            if count > budget:
+                cut_index = i
+                break
+        return text[:cut_index].strip()
     words = re.findall(r"\b[\w'-]+\b", text)
     if len(words) <= budget:
         return text.strip()
     return " ".join(words[:budget]).strip()
+
+
+def _hard_word_cap(text: str, budget: int) -> str:
+    """Legacy word cap — for backward compatibility."""
+    return _hard_unit_cap(text, budget, "words")

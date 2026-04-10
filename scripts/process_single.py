@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Force one subtitle line per TTS chunk for tighter sentence timing.",
     )
+    parser.add_argument(
+        "--target-language",
+        default=None,
+        help="Target language code (e.g. ja, fr, es, ko). Defaults to 'en' (English).",
+    )
     return parser
 
 
@@ -82,6 +87,15 @@ def main() -> int:
         config.tts.auto_reference_from_source = False
     if args.line_sync:
         apply_line_sync_tts_defaults(config)
+
+    if args.target_language:
+        from src.translate import LANGUAGE_NAMES
+
+        config.translate.target_language = args.target_language
+        config.translate.target_language_name = LANGUAGE_NAMES.get(
+            args.target_language,
+            f"natural spoken {args.target_language}",
+        )
 
     output_path = process_video(args.video, config)
     print(output_path)
